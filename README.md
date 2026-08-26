@@ -546,6 +546,14 @@ local ModInfJumpEnabled = false
 local ModNoclipEnabled = false
 
 -- ==========================================
+-- Match / Auto Queue state
+-- ==========================================
+_G.__PrivateHubMatchState = _G.__PrivateHubMatchState or {
+    Enabled = false,
+    Mode = "1v1"
+}
+
+-- ==========================================
 -- Abilities / Knife / Cooldown / Dash
 -- ==========================================
 local KnifeSettings = {
@@ -981,7 +989,7 @@ local mainScroll = Instance.new("ScrollingFrame")
 mainScroll.Size = UDim2.new(1, 0, 1, 0)
 mainScroll.BackgroundTransparency = 1
 mainScroll.BorderSizePixel = 0
-mainScroll.CanvasSize = UDim2.new(0, 0, 0, 1120) -- Abilities 統合分を拡張
+mainScroll.CanvasSize = UDim2.new(0, 0, 0, 1630) -- Match / Abilities / Combat / Silent Aim
 mainScroll.ScrollBarThickness = 4
 mainScroll.ScrollingDirection = Enum.ScrollingDirection.Y
 mainScroll.ScrollingEnabled = true
@@ -1032,9 +1040,164 @@ CheckboxSetters["Noclip"] = createCheckboxToggle(playerSection, "Wall Noclip", 1
 	end
 end)
 
+-- ==========================================
+-- Match
+-- ==========================================
+local matchSection = Instance.new("Frame")
+matchSection.Name = "MatchSection"
+matchSection.Size = UDim2.new(0.92, 0, 0, 190)
+matchSection.Position = UDim2.new(0.04, 0, 0, 255)
+matchSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+matchSection.BorderSizePixel = 0
+matchSection.Parent = mainScroll
+Instance.new("UICorner", matchSection).CornerRadius = UDim.new(0, 6)
+addStroke(matchSection, Color3.fromRGB(40, 40, 45), 0, 1)
+
+local matchTitle = Instance.new("TextLabel")
+matchTitle.Name = "DynamicText"
+matchTitle.Size = UDim2.new(1, 0, 0, 35)
+matchTitle.BackgroundTransparency = 1
+matchTitle.Font = FONT_BOLD
+matchTitle.Text = "Match"
+matchTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
+matchTitle.TextSize = 13
+matchTitle.Parent = matchSection
+
+local matchModeBtn = Instance.new("TextButton")
+matchModeBtn.Name = "MatchModeDropdown"
+matchModeBtn.Size = UDim2.new(1, -20, 0, 32)
+matchModeBtn.Position = UDim2.new(0, 10, 0, 40)
+matchModeBtn.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
+matchModeBtn.BorderSizePixel = 0
+matchModeBtn.Font = FONT_MAIN
+matchModeBtn.Text = "Mode: " .. tostring(_G.__PrivateHubMatchState.Mode)
+matchModeBtn.TextColor3 = Color3.fromRGB(220, 220, 225)
+matchModeBtn.TextSize = 12
+matchModeBtn.TextXAlignment = Enum.TextXAlignment.Left
+matchModeBtn.Parent = matchSection
+Instance.new("UICorner", matchModeBtn).CornerRadius = UDim.new(0, 4)
+addPadding(matchModeBtn, 10)
+addStroke(matchModeBtn, Color3.fromRGB(50, 50, 55), 0, 1)
+
+local matchDropdown = Instance.new("ScrollingFrame")
+matchDropdown.Name = "ModeList"
+matchDropdown.Size = UDim2.new(1, -20, 0, 92)
+matchDropdown.Position = UDim2.new(0, 10, 0, 74)
+matchDropdown.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+matchDropdown.BorderSizePixel = 0
+matchDropdown.ScrollBarThickness = 2
+matchDropdown.CanvasSize = UDim2.new(0, 0, 0, 4 * 28)
+matchDropdown.Visible = false
+matchDropdown.ZIndex = 20
+matchDropdown.Parent = matchSection
+Instance.new("UICorner", matchDropdown).CornerRadius = UDim.new(0, 4)
+addStroke(matchDropdown, Color3.fromRGB(50, 50, 55), 0, 1)
+
+local matchModes = {"1v1", "2v2", "3v3", "4v4"}
+
+_G.__PrivateHubMatchSetMode = function(mode)
+    if mode ~= "1v1" and mode ~= "2v2" and mode ~= "3v3" and mode ~= "4v4" then
+        mode = "1v1"
+    end
+    _G.__PrivateHubMatchState.Mode = mode
+    matchModeBtn.Text = "Mode: " .. mode
+    matchDropdown.Visible = false
+end
+
+for i, modeName in ipairs(matchModes) do
+    local modeBtn = Instance.new("TextButton")
+    modeBtn.Size = UDim2.new(1, 0, 0, 28)
+    modeBtn.Position = UDim2.new(0, 0, 0, (i - 1) * 28)
+    modeBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 23)
+    modeBtn.BorderSizePixel = 0
+    modeBtn.Font = FONT_MAIN
+    modeBtn.Text = modeName
+    modeBtn.TextColor3 = Color3.fromRGB(205, 205, 210)
+    modeBtn.TextSize = 12
+    modeBtn.TextXAlignment = Enum.TextXAlignment.Left
+    modeBtn.ZIndex = 21
+    modeBtn.Parent = matchDropdown
+    addPadding(modeBtn, 10)
+
+    modeBtn.MouseButton1Click:Connect(function()
+        _G.__PrivateHubMatchSetMode(modeName)
+    end)
+end
+
+matchModeBtn.MouseButton1Click:Connect(function()
+    matchDropdown.Visible = not matchDropdown.Visible
+end)
+
+CheckboxSetters["AutoMatch"] = createCheckboxToggle(matchSection, "Auto Re-Queue", 145, function(enabled)
+    _G.__PrivateHubMatchState.Enabled = enabled
+end)
+
+-- Auto Matchmaking: 試合終了時に選択したモードで再キュー
+task.spawn(function()
+    local queueRemote
+    local finishedRemote
+
+    local ok = pcall(function()
+        local gm = ReplicatedStorage:WaitForChild("GlobalMatchmaking", 10)
+        local gmRemotes = gm and gm:WaitForChild("Remotes", 10)
+        queueRemote = gmRemotes and gmRemotes:WaitForChild("JoinQueue", 10)
+
+        local finishedFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
+        finishedRemote = finishedFolder and finishedFolder:WaitForChild("OnMatchFinished", 10)
+    end)
+
+    if not ok or not queueRemote or not finishedRemote then
+        warn("[Match] JoinQueue / OnMatchFinished が見つかりません")
+        return
+    end
+
+    if not finishedRemote.OnClientEvent then
+        warn("[Match] OnMatchFinished がRemoteEventではありません")
+        return
+    end
+
+    finishedRemote.OnClientEvent:Connect(function(...)
+        if not _G.__PrivateHubMatchState.Enabled then
+            return
+        end
+
+        local modeMap = {
+            ["1v1"] = "Solo",
+            ["2v2"] = "Duo",
+            ["3v3"] = "Trio",
+            ["4v4"] = "Squad"
+        }
+
+        local mode = _G.__PrivateHubMatchState.Mode or "1v1"
+        local queueArg = modeMap[mode] or "Solo"
+
+        print("[Match] 試合終了: " .. mode .. " -> " .. queueArg)
+
+        task.wait(1.5)
+
+        local success, err = pcall(function()
+            if queueRemote:IsA("RemoteFunction") then
+                return queueRemote:InvokeServer(queueArg)
+            elseif queueRemote:IsA("RemoteEvent") then
+                return queueRemote:FireServer(queueArg)
+            else
+                error("JoinQueue のクラスが未対応: " .. queueRemote.ClassName)
+            end
+        end)
+
+        if success then
+            print("[Match] 再キュー成功: " .. queueArg)
+        else
+            warn("[Match] 再キュー失敗: " .. tostring(err))
+        end
+    end)
+
+    print("[Match] Auto Re-Queue listener connected")
+end)
+
 local silentAimSection = Instance.new("Frame")
 silentAimSection.Size = UDim2.new(0.92, 0, 0, 280)
-silentAimSection.Position = UDim2.new(0.04, 0, 0, 1115) -- Combat の下へ移動
+silentAimSection.Position = UDim2.new(0.04, 0, 0, 1320) -- Combat の下へ移動
 silentAimSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
 silentAimSection.BorderSizePixel = 0
 silentAimSection.Parent = mainScroll
@@ -1936,7 +2099,7 @@ local LocalPlayer = Players.LocalPlayer
 
 local lagSection = Instance.new("Frame")
 lagSection.Size = UDim2.new(0.92, 0, 0, 185)
-lagSection.Position = UDim2.new(0.04, 0, 0, 255)
+lagSection.Position = UDim2.new(0.04, 0, 0, 460)
 lagSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
 lagSection.BorderSizePixel = 0
 lagSection.Parent = mainScroll
@@ -2095,7 +2258,7 @@ end)
 -- ==========================================
 local abilitiesSection = Instance.new("Frame")
 abilitiesSection.Size = UDim2.new(0.92, 0, 0, 470)
-abilitiesSection.Position = UDim2.new(0.04, 0, 0, 455)
+abilitiesSection.Position = UDim2.new(0.04, 0, 0, 660)
 abilitiesSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
 abilitiesSection.BorderSizePixel = 0
 abilitiesSection.Parent = mainScroll
@@ -2372,7 +2535,7 @@ local function createButtonRow(name, defaultVal, yPos)
 	return btn
 end
 
-local function createInputRow(name, defaultVal, yPos)
+createInputRow = function(name, defaultVal, yPos)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, -20, 0, 30)
 	row.Position = UDim2.new(0, 10, 0, yPos)
@@ -2414,7 +2577,7 @@ _G.__PrivateHubToggleKeyBtn = createButtonRow("Toggle Key", "RightShift", 154)
 _G.__PHStartupSoundBox = createInputRow("Startup Sound ID", "0", 192)
 _G.__PHNotificationSoundBox = createInputRow("Notification Sound ID", "0", 230)
 
-local function applyThemeColors()
+applyThemeColors = function()
 	local mainCol = _G.__PHMainColorBtn.BackgroundColor3
 	local accentCol = _G.__PHAccentColorBtn.BackgroundColor3
 	local textCol = _G.__PHTextColorBtn.BackgroundColor3
@@ -2654,6 +2817,8 @@ Config_gatherSettingsData = function()
 		walkSpeed = ModSpeedValue,
 		infJump = ModInfJumpEnabled,
 		noclip = ModNoclipEnabled,
+		matchAutoQueue = _G.__PrivateHubMatchState.Enabled,
+		matchMode = _G.__PrivateHubMatchState.Mode,
 		silentAim = SilentAimEnabled,
 		aimbot = AimbotEnabled,
 		wallCheck = WallCheckEnabled,
@@ -2753,6 +2918,13 @@ Config_loadConfigByName = function(Config_cName)
 				if Config_data.walkSpeed and SliderSetters["WalkSpeed"] then SliderSetters["WalkSpeed"](Config_data.walkSpeed) end
 				if Config_data.infJump ~= nil and CheckboxSetters["InfJump"] then CheckboxSetters["InfJump"](Config_data.infJump, true) end
 				if Config_data.noclip ~= nil and CheckboxSetters["Noclip"] then CheckboxSetters["Noclip"](Config_data.noclip, true) end
+
+				if Config_data.matchMode and _G.__PrivateHubMatchSetMode then
+					_G.__PrivateHubMatchSetMode(Config_data.matchMode)
+				end
+				if Config_data.matchAutoQueue ~= nil and CheckboxSetters["AutoMatch"] then
+					CheckboxSetters["AutoMatch"](Config_data.matchAutoQueue, true)
+				end
 
 				if Config_data.silentAim ~= nil and CheckboxSetters["SilentAim"] then CheckboxSetters["SilentAim"](Config_data.silentAim, true) end
 				if Config_data.aimbot ~= nil and CheckboxSetters["Aimbot"] then CheckboxSetters["Aimbot"](Config_data.aimbot, true) end
@@ -3200,14 +3372,14 @@ end)
 local combatSection = Instance.new("Frame")
 combatSection.Name = "CombatSection"
 combatSection.Size = UDim2.new(0.92, 0, 0, 160)
-combatSection.Position = UDim2.new(0.04, 0, 0, 940) -- Abilities の下へ移動
+combatSection.Position = UDim2.new(0.04, 0, 0, 1145) -- Abilities の下へ移動
 combatSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
 combatSection.BorderSizePixel = 0
 combatSection.Parent = mainScroll
 Instance.new("UICorner", combatSection).CornerRadius = UDim.new(0, 6)
 addStroke(combatSection, Color3.fromRGB(40, 40, 45), 0, 1)
 
-mainScroll.CanvasSize = UDim2.new(0, 0, 0, 1420)
+mainScroll.CanvasSize = UDim2.new(0, 0, 0, 1630)
 
 local combatTitle = Instance.new("TextLabel")
 combatTitle.Name = "DynamicText"
