@@ -13,6 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
+local Stats = game:GetService("Stats")
 
 local LocalPlayer = Players.LocalPlayer
 local playerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -35,6 +36,22 @@ local FOV_Rainbow = false
 local MVSD_ESP_Enabled = false
 local MVSD_ESP_Color = Color3.fromRGB(0, 245, 212)
 local activeTargetCount = 0
+
+-- Server Desync Visualizer / Hitbox states (Visuals > ESP)
+local ServerDesync_Enabled = false
+local ServerDesync_Color = MVSD_ESP_Color
+local ServerDesync_UpdateInterval = 0.05
+local ServerDesync_PositionHistory = {}
+local ServerDesync_FakeCharacter = nil
+local ServerDesync_FakeRootPart = nil
+local ServerDesync_BoxAdornment = nil
+local ServerDesync_Connection = nil
+local ServerDesync_Setup
+local ServerDesync_ClearFake
+local Hitbox_Enabled = false
+local Hitbox_Size = 10
+local Hitbox_Color = MVSD_ESP_Color
+local Hitbox_Original = {}
 
 -- Appearance / Player Attribute state
 local Appearance_IsVip = false
@@ -635,6 +652,12 @@ local function clearInvisibility()
 end
 
 local function setInvisibilityEnabled(enabled)
+    -- 同じInvisibility処理をConfig読込/起動時に二重実行しない。
+    -- 既にinvischairが存在して有効なら、そのまま維持する。
+    if enabled and InvisibilityEnabled and invisChair and invisChair.Parent then
+        return
+    end
+
     InvisibilityEnabled = enabled
 
     if not enabled then
@@ -918,8 +941,13 @@ local function createSliderRow(parent, text, minVal, maxVal, defaultVal, yPos, c
 
 	local function setValue(val)
 		val = math.clamp(val, minVal, maxVal)
-		currentVal = math.floor(val * 10 + 0.5) / 10
-		valLbl.Text = string.format("%.1f", currentVal)
+		if text == "WinStreak Value" then
+			currentVal = math.floor(val + 0.5)
+			valLbl.Text = tostring(currentVal)
+		else
+			currentVal = math.floor(val * 10 + 0.5) / 10
+			valLbl.Text = string.format("%.1f", currentVal)
+		end
 		fill.Size = UDim2.new((currentVal - minVal) / (maxVal - minVal), 0, 1, 0)
 		callback(currentVal)
 	end
@@ -1040,6 +1068,18 @@ CheckboxSetters["Noclip"] = createCheckboxToggle(playerSection, "Wall Noclip", 1
 	end
 end)
 
+-- Infinite Air Jump
+-- JumpRequest works with keyboard/controller/mobile jump input.
+local infiniteJumpConnection = UserInputService.JumpRequest:Connect(function()
+    if not ModInfJumpEnabled then return end
+
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid and humanoid.Health > 0 then
+        humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+    end
+end)
+
 -- ==========================================
 -- Match
 -- ==========================================
@@ -1134,65 +1174,38 @@ end)
 
 -- Auto Matchmaking: 試合終了時に選択したモードで再キュー
 task.spawn(function()
-    local queueRemote
-    local finishedRemote
-
-    local ok = pcall(function()
+    local ok, remotes = pcall(function()
         local gm = ReplicatedStorage:WaitForChild("GlobalMatchmaking", 10)
         local gmRemotes = gm and gm:WaitForChild("Remotes", 10)
-        queueRemote = gmRemotes and gmRemotes:WaitForChild("JoinQueue", 10)
-
+        local queue = gmRemotes and gmRemotes:WaitForChild("JoinQueue", 10)
         local finishedFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
-        finishedRemote = finishedFolder and finishedFolder:WaitForChild("OnMatchFinished", 10)
+        local finished = finishedFolder and finishedFolder:WaitForChild("OnMatchFinished", 10)
+        return queue, finished
     end)
 
-    if not ok or not queueRemote or not finishedRemote then
-        warn("[Match] JoinQueue / OnMatchFinished が見つかりません")
-        return
-    end
+    if ok and remotes then
+        local queueRemote, finishedRemote = remotes
+        if finishedRemote and finishedRemote.OnClientEvent then
+            finishedRemote.OnClientEvent:Connect(function()
+                if not _G.__PrivateHubMatchState.Enabled then return end
 
-    if not finishedRemote.OnClientEvent then
-        warn("[Match] OnMatchFinished がRemoteEventではありません")
-        return
-    end
+                local modeMap = {
+                    ["1v1"] = "Solo",
+                    ["2v2"] = "Duo",
+                    ["3v3"] = "Trio",
+                    ["4v4"] = "Squad"
+                }
+                local queueArg = modeMap[_G.__PrivateHubMatchState.Mode] or "Solo"
 
-    finishedRemote.OnClientEvent:Connect(function(...)
-        if not _G.__PrivateHubMatchState.Enabled then
-            return
+                task.wait(1.5)
+                pcall(function()
+                    if queueRemote and queueRemote.InvokeServer then
+                        queueRemote:InvokeServer(queueArg)
+                    end
+                end)
+            end)
         end
-
-        local modeMap = {
-            ["1v1"] = "Solo",
-            ["2v2"] = "Duo",
-            ["3v3"] = "Trio",
-            ["4v4"] = "Squad"
-        }
-
-        local mode = _G.__PrivateHubMatchState.Mode or "1v1"
-        local queueArg = modeMap[mode] or "Solo"
-
-        print("[Match] 試合終了: " .. mode .. " -> " .. queueArg)
-
-        task.wait(1.5)
-
-        local success, err = pcall(function()
-            if queueRemote:IsA("RemoteFunction") then
-                return queueRemote:InvokeServer(queueArg)
-            elseif queueRemote:IsA("RemoteEvent") then
-                return queueRemote:FireServer(queueArg)
-            else
-                error("JoinQueue のクラスが未対応: " .. queueRemote.ClassName)
-            end
-        end)
-
-        if success then
-            print("[Match] 再キュー成功: " .. queueArg)
-        else
-            warn("[Match] 再キュー失敗: " .. tostring(err))
-        end
-    end)
-
-    print("[Match] Auto Re-Queue listener connected")
+    end
 end)
 
 local silentAimSection = Instance.new("Frame")
@@ -1245,12 +1258,12 @@ local visualsScroll = Instance.new("ScrollingFrame")
 visualsScroll.Size = UDim2.new(1, 0, 1, 0)
 visualsScroll.BackgroundTransparency = 1
 visualsScroll.BorderSizePixel = 0
-visualsScroll.CanvasSize = UDim2.new(0, 0, 0, 390)
+visualsScroll.CanvasSize = UDim2.new(0, 0, 0, 565)
 visualsScroll.ScrollBarThickness = 2
 visualsScroll.Parent = visualsPage
 
 local espSection = Instance.new("Frame")
-espSection.Size = UDim2.new(0.92, 0, 0, 150)
+espSection.Size = UDim2.new(0.92, 0, 0, 315)
 espSection.Position = UDim2.new(0.04, 0, 0, 15)
 espSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
 espSection.BorderSizePixel = 0
@@ -1277,11 +1290,173 @@ CheckboxSetters["MVSD_ESP"] = createCheckboxToggle(espSection, "Enable Team ESP"
 	MVSD_ESP_Enabled = enabled
 end)
 
+-- Server Desync Visualizer
+local serverDesyncColorBtn = createColorPreviewRowInParent(espSection, "Server Desync Color", ServerDesync_Color, 115)
+ColorBtnSetters["ServerDesyncColor"] = serverDesyncColorBtn
+
+-- Keep the live Server Desync visualizer synchronized with the shared palette.
+if type(serverDesyncColorBtn) == "function" then
+	local _oldServerDesyncColorBtn = serverDesyncColorBtn
+	ColorBtnSetters["ServerDesyncColor"] = function(c)
+		ServerDesync_Color = c
+		if ServerDesync_BoxAdornment then ServerDesync_BoxAdornment.Color3 = c end
+		return _oldServerDesyncColorBtn(c)
+	end
+end
+CheckboxSetters["ServerDesync"] = createCheckboxToggle(espSection, "Server Desync Visualizer", 155, function(enabled)
+	ServerDesync_Enabled = enabled
+	if enabled then ServerDesync_Setup() else ServerDesync_ClearFake() end
+end)
+
+-- Hitbox
+CheckboxSetters["Hitbox"] = createCheckboxToggle(espSection, "Hitbox", 190, function(enabled)
+	Hitbox_Enabled = enabled
+end)
+SliderSetters["HitboxSize"] = createSliderRow(espSection, "Hitbox Size", 1, 50, Hitbox_Size, 225, function(val)
+	Hitbox_Size = val
+end)
+
+-- Hitbox Color（Private Hub 共通パレット）
+local hitboxColorBtn = createColorPreviewRowInParent(espSection, "Hitbox Color", Hitbox_Color, 270)
+ColorBtnSetters["HitboxColor"] = hitboxColorBtn
+
+-- Server Desync Visualizer runtime
+function ServerDesync_ClearFake()
+	if ServerDesync_Connection then ServerDesync_Connection:Disconnect(); ServerDesync_Connection = nil end
+	if ServerDesync_FakeCharacter then ServerDesync_FakeCharacter:Destroy(); ServerDesync_FakeCharacter = nil end
+	ServerDesync_FakeRootPart = nil
+	ServerDesync_BoxAdornment = nil
+	ServerDesync_PositionHistory = {}
+end
+
+function ServerDesync_Setup()
+	ServerDesync_ClearFake()
+	if not ServerDesync_Enabled then return end
+	local char = LocalPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then
+		task.spawn(function()
+			if not ServerDesync_Enabled then return end
+			local c = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+			local r = c:WaitForChild("HumanoidRootPart", 5)
+			if ServerDesync_Enabled and r then ServerDesync_Setup() end
+		end)
+		return
+	end
+	ServerDesync_FakeCharacter = Instance.new("Model")
+	ServerDesync_FakeCharacter.Name = "FakeCharacter_ServerView"
+	ServerDesync_FakeCharacter.Parent = Workspace
+	ServerDesync_FakeRootPart = Instance.new("Part")
+	ServerDesync_FakeRootPart.Name = "HumanoidRootPart"
+	ServerDesync_FakeRootPart.Size = root.Size
+	ServerDesync_FakeRootPart.CFrame = root.CFrame
+	ServerDesync_FakeRootPart.Anchored = true
+	ServerDesync_FakeRootPart.CanCollide = false
+	ServerDesync_FakeRootPart.Transparency = 1
+	ServerDesync_FakeRootPart.Material = Enum.Material.Plastic
+	ServerDesync_FakeRootPart.Parent = ServerDesync_FakeCharacter
+	ServerDesync_BoxAdornment = Instance.new("BoxHandleAdornment")
+	ServerDesync_BoxAdornment.Name = "ServerViewBox"
+	ServerDesync_BoxAdornment.Adornee = ServerDesync_FakeRootPart
+	ServerDesync_BoxAdornment.Size = Vector3.new(3.5, 6, 2.5)
+	ServerDesync_BoxAdornment.Color3 = ServerDesync_Color
+	ServerDesync_BoxAdornment.Transparency = 0.7
+	ServerDesync_BoxAdornment.AlwaysOnTop = true
+	ServerDesync_BoxAdornment.Parent = ServerDesync_FakeRootPart
+	ServerDesync_Connection = RunService.Heartbeat:Connect(function()
+		if not ServerDesync_Enabled then return end
+		local c = LocalPlayer.Character
+		local r = c and c:FindFirstChild("HumanoidRootPart")
+		if not r or not ServerDesync_FakeRootPart then return end
+		table.insert(ServerDesync_PositionHistory, {p=r.Position,t=tick()})
+		local maxHistory = math.ceil(2000/(ServerDesync_UpdateInterval*1000))+10
+		while #ServerDesync_PositionHistory > maxHistory do table.remove(ServerDesync_PositionHistory,1) end
+		local ping=0
+		pcall(function() ping=Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+		ping=math.max(10,math.min(1000,tonumber(ping) or 0))
+		local target=tick()-ping/1000
+		local best=ServerDesync_PositionHistory[#ServerDesync_PositionHistory]
+		for i=1,#ServerDesync_PositionHistory do
+			local e=ServerDesync_PositionHistory[i]
+			if math.abs(e.t-target)<math.abs(best.t-target) then best=e end
+		end
+		local cf=r.CFrame
+		ServerDesync_FakeRootPart.CFrame=CFrame.new(best.p)*(cf-cf.Position)
+	end)
+end
+
+LocalPlayer.CharacterAdded:Connect(function()
+	if ServerDesync_Enabled then task.wait(0.5); ServerDesync_Setup() end
+end)
+
+-- Hitbox runtime (SlowKill と同じ敵判定: Team1/Team2 + 同じMatchWorkspaceのみ)
+RunService.RenderStepped:Connect(function()
+	for plr, data in pairs(Hitbox_Original) do
+		if not Hitbox_Enabled or not plr.Parent or not plr.Character or not plr.Character:FindFirstChild("HumanoidRootPart") then
+			if plr.Parent and plr.Character then
+				local r = plr.Character:FindFirstChild("HumanoidRootPart")
+				if r and data.size then
+					r.Size = data.size
+					r.Transparency = data.transparency
+					r.Color = data.color
+					r.CanCollide = data.canCollide
+				end
+			end
+			Hitbox_Original[plr] = nil
+		end
+	end
+	if not Hitbox_Enabled then return end
+
+	local myTeamName = ""
+	pcall(function() myTeamName = GetPlayerTeam(LocalPlayer):lower() end)
+	if myTeamName ~= "team1" and myTeamName ~= "team2" then return end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= LocalPlayer and plr.Character then
+			local targetTeamName = ""
+			pcall(function() targetTeamName = GetPlayerTeam(plr):lower() end)
+			local isEnemy = false
+			if (targetTeamName == "team1" or targetTeamName == "team2") and targetTeamName ~= myTeamName then
+				local sameMatch = false
+				pcall(function() sameMatch = IsInSameMatchWorkspace(plr) end)
+				if sameMatch then isEnemy = true end
+			end
+
+			if isEnemy then
+				local r = plr.Character:FindFirstChild("HumanoidRootPart")
+				local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+				if r and hum and hum.Health > 0 then
+					if not Hitbox_Original[plr] then
+						Hitbox_Original[plr] = {size=r.Size, transparency=r.Transparency, color=r.Color, canCollide=r.CanCollide}
+					end
+					r.Size = Vector3.new(Hitbox_Size, Hitbox_Size, Hitbox_Size)
+					r.Color = Hitbox_Color
+					r.Transparency = 0.6
+					r.CanCollide = false
+				end
+			end
+		end
+	end
+end)
+
+-- Server Desync: toggle後にも確実に生成されるよう、キャラクター未準備時は再試行
+local _OldServerDesyncSetup = ServerDesync_Setup
+ServerDesync_Setup = function()
+	_OldServerDesyncSetup()
+	if ServerDesync_Enabled and not ServerDesync_FakeCharacter then
+		task.delay(0.25, function()
+			if ServerDesync_Enabled and not ServerDesync_FakeCharacter then
+				_OldServerDesyncSetup()
+			end
+		end)
+	end
+end
+
 -- Appearance セクション
 local appearanceSection = Instance.new("Frame")
 appearanceSection.Name = "AppearanceSection"
 appearanceSection.Size = UDim2.new(0.92, 0, 0, 195)
-appearanceSection.Position = UDim2.new(0.04, 0, 0, 180)
+appearanceSection.Position = UDim2.new(0.04, 0, 0, 345)
 appearanceSection.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
 appearanceSection.BorderSizePixel = 0
 appearanceSection.Parent = visualsScroll
@@ -1322,6 +1497,7 @@ SliderSetters["Appearance_WinStreakValue"] = createSliderRow(
     Appearance_WinStreakValue,
     115,
     function(val)
+        val = math.floor(tonumber(val) or 0)
         Appearance_WinStreakValue = val
         if Appearance_WinStreakEnabled then
             pcall(function()
@@ -2265,7 +2441,7 @@ abilitiesSection.Parent = mainScroll
 Instance.new("UICorner", abilitiesSection).CornerRadius = UDim.new(0, 6)
 addStroke(abilitiesSection, Color3.fromRGB(40, 40, 45), 0, 1)
 
-local abilitiesTitle = Instance.new("TextLabel")
+abilitiesTitle = Instance.new("TextLabel")
 abilitiesTitle.Name = "DynamicText"
 abilitiesTitle.Size = UDim2.new(1, 0, 0, 35)
 abilitiesTitle.BackgroundTransparency = 1
@@ -2318,8 +2494,8 @@ end)
 --------------------------------------------------
 -- Settings タブ内容構築 (Config & Palette)
 --------------------------------------------------
-local settingsPage = tabPages["Settings"]
-local settingsScroll = Instance.new("ScrollingFrame")
+settingsPage = tabPages["Settings"]
+settingsScroll = Instance.new("ScrollingFrame")
 settingsScroll.Size = UDim2.new(1, 0, 1, 0)
 settingsScroll.BackgroundTransparency = 1
 settingsScroll.BorderSizePixel = 0
@@ -2327,7 +2503,7 @@ settingsScroll.CanvasSize = UDim2.new(0, 0, 0, 720)
 settingsScroll.ScrollBarThickness = 2
 settingsScroll.Parent = settingsPage
 
-local configFrame = Instance.new("Frame")
+configFrame = Instance.new("Frame")
 configFrame.Size = UDim2.new(0.92, 0, 0, 310)
 configFrame.Position = UDim2.new(0.04, 0, 0, 15)
 configFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
@@ -2336,7 +2512,7 @@ configFrame.Parent = settingsScroll
 Instance.new("UICorner", configFrame).CornerRadius = UDim.new(0, 6)
 addStroke(configFrame, Color3.fromRGB(40, 40, 45), 0, 1)
 
-local configTitle = Instance.new("TextLabel")
+configTitle = Instance.new("TextLabel")
 configTitle.Name = "DynamicText"
 configTitle.Size = UDim2.new(1, 0, 0, 35)
 configTitle.BackgroundTransparency = 1
@@ -2346,7 +2522,7 @@ configTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 configTitle.TextSize = 13
 configTitle.Parent = configFrame
 
-local nameLabel = Instance.new("TextLabel")
+nameLabel = Instance.new("TextLabel")
 nameLabel.Name = "DynamicText"
 nameLabel.Size = UDim2.new(1, -20, 0, 20)
 nameLabel.Position = UDim2.new(0, 10, 0, 40)
@@ -2358,7 +2534,7 @@ nameLabel.TextSize = 12
 nameLabel.TextXAlignment = Enum.TextXAlignment.Left
 nameLabel.Parent = configFrame
 
-local nameBox = Instance.new("TextBox")
+nameBox = Instance.new("TextBox")
 nameBox.Size = UDim2.new(1, -20, 0, 30)
 nameBox.Position = UDim2.new(0, 10, 0, 62)
 nameBox.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
@@ -2373,7 +2549,7 @@ Instance.new("UICorner", nameBox).CornerRadius = UDim.new(0, 4)
 addStroke(nameBox, Color3.fromRGB(50, 50, 55), 0, 1)
 addPadding(nameBox, 8)
 
-local listLabel = Instance.new("TextLabel")
+listLabel = Instance.new("TextLabel")
 listLabel.Name = "DynamicText"
 listLabel.Size = UDim2.new(1, -20, 0, 20)
 listLabel.Position = UDim2.new(0, 10, 0, 100)
@@ -2385,7 +2561,7 @@ listLabel.TextSize = 12
 listLabel.TextXAlignment = Enum.TextXAlignment.Left
 listLabel.Parent = configFrame
 
-local dropdownBtn = Instance.new("TextButton")
+dropdownBtn = Instance.new("TextButton")
 dropdownBtn.Size = UDim2.new(1, -20, 0, 30)
 dropdownBtn.Position = UDim2.new(0, 10, 0, 122)
 dropdownBtn.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
@@ -2400,7 +2576,7 @@ Instance.new("UICorner", dropdownBtn).CornerRadius = UDim.new(0, 4)
 addStroke(dropdownBtn, Color3.fromRGB(50, 50, 55), 0, 1)
 addPadding(dropdownBtn, 8)
 
-local dropdownListFrame = Instance.new("ScrollingFrame")
+dropdownListFrame = Instance.new("ScrollingFrame")
 dropdownListFrame.Size = UDim2.new(1, -20, 0, 80)
 dropdownListFrame.Position = UDim2.new(0, 10, 0, 155)
 dropdownListFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 20)
@@ -2413,11 +2589,11 @@ dropdownListFrame.Parent = configFrame
 Instance.new("UICorner", dropdownListFrame).CornerRadius = UDim.new(0, 4)
 addStroke(dropdownListFrame, Color3.fromRGB(60, 60, 65), 0, 1)
 
-local listLayout = Instance.new("UIListLayout")
+listLayout = Instance.new("UIListLayout")
 listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 listLayout.Parent = dropdownListFrame
 
-local btnCreate = Instance.new("TextButton")
+btnCreate = Instance.new("TextButton")
 btnCreate.Size = UDim2.new(0.5, -13, 0, 30)
 btnCreate.Position = UDim2.new(0, 10, 0, 162)
 btnCreate.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
@@ -2430,7 +2606,7 @@ btnCreate.Parent = configFrame
 Instance.new("UICorner", btnCreate).CornerRadius = UDim.new(0, 4)
 addStroke(btnCreate, Color3.fromRGB(50, 50, 55), 0, 1)
 
-local btnLoad = Instance.new("TextButton")
+btnLoad = Instance.new("TextButton")
 btnLoad.Size = UDim2.new(0.5, -13, 0, 30)
 btnLoad.Position = UDim2.new(0.5, 3, 0, 162)
 btnLoad.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
@@ -2443,7 +2619,7 @@ btnLoad.Parent = configFrame
 Instance.new("UICorner", btnLoad).CornerRadius = UDim.new(0, 4)
 addStroke(btnLoad, Color3.fromRGB(50, 50, 55), 0, 1)
 
-local btnOverwrite = Instance.new("TextButton")
+btnOverwrite = Instance.new("TextButton")
 btnOverwrite.Size = UDim2.new(0.5, -13, 0, 30)
 btnOverwrite.Position = UDim2.new(0, 10, 0, 198)
 btnOverwrite.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
@@ -2456,7 +2632,7 @@ btnOverwrite.Parent = configFrame
 Instance.new("UICorner", btnOverwrite).CornerRadius = UDim.new(0, 4)
 addStroke(btnOverwrite, Color3.fromRGB(50, 50, 55), 0, 1)
 
-local btnDelete = Instance.new("TextButton")
+btnDelete = Instance.new("TextButton")
 btnDelete.Size = UDim2.new(0.5, -13, 0, 30)
 btnDelete.Position = UDim2.new(0.5, 3, 0, 198)
 btnDelete.BackgroundColor3 = Color3.fromRGB(22, 22, 25)
@@ -2469,7 +2645,7 @@ btnDelete.Parent = configFrame
 Instance.new("UICorner", btnDelete).CornerRadius = UDim.new(0, 4)
 addStroke(btnDelete, Color3.fromRGB(50, 50, 55), 0, 1)
 
-local btnRefresh = Instance.new("TextButton")
+btnRefresh = Instance.new("TextButton")
 btnRefresh.Size = UDim2.new(1, -20, 0, 26)
 btnRefresh.Position = UDim2.new(0, 10, 0, 236)
 btnRefresh.BackgroundColor3 = Color3.fromRGB(18, 18, 20)
@@ -2482,7 +2658,7 @@ btnRefresh.Parent = configFrame
 Instance.new("UICorner", btnRefresh).CornerRadius = UDim.new(0, 4)
 addStroke(btnRefresh, Color3.fromRGB(40, 40, 45), 0, 1)
 
-local settingGuiFrame = Instance.new("Frame")
+settingGuiFrame = Instance.new("Frame")
 settingGuiFrame.Size = UDim2.new(0.92, 0, 0, 350)
 settingGuiFrame.Position = UDim2.new(0.04, 0, 0, 340)
 settingGuiFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
@@ -2491,7 +2667,7 @@ settingGuiFrame.Parent = settingsScroll
 Instance.new("UICorner", settingGuiFrame).CornerRadius = UDim.new(0, 6)
 addStroke(settingGuiFrame, Color3.fromRGB(40, 40, 45), 0, 1)
 
-local settingGuiTitle = Instance.new("TextLabel")
+settingGuiTitle = Instance.new("TextLabel")
 settingGuiTitle.Name = "DynamicText"
 settingGuiTitle.Size = UDim2.new(1, 0, 0, 35)
 settingGuiTitle.BackgroundTransparency = 1
@@ -2501,7 +2677,7 @@ settingGuiTitle.TextColor3 = Color3.fromRGB(255, 255, 255)
 settingGuiTitle.TextSize = 13
 settingGuiTitle.Parent = settingGuiFrame
 
-local function createButtonRow(name, defaultVal, yPos)
+createButtonRow = function(name, defaultVal, yPos)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, -20, 0, 30)
 	row.Position = UDim2.new(0, 10, 0, yPos)
@@ -2657,6 +2833,11 @@ while __Palette.i <= #__Palette.colors do
 					FOV_Color = selectedColor
 				elseif target == espColorBtn then
 					MVSD_ESP_Color = selectedColor
+				elseif target == serverDesyncColorBtn then
+					ServerDesync_Color = selectedColor
+					if ServerDesync_BoxAdornment then ServerDesync_BoxAdornment.Color3 = selectedColor end
+				elseif target == hitboxColorBtn then
+					Hitbox_Color = selectedColor
 				elseif target == crosshairColorBtn then
 					customCrosshairColor = selectedColor
 				end
@@ -2677,9 +2858,12 @@ fovColorBtn.MouseButton1Click:Connect(function() openPalette(fovColorBtn) end)
 worldChangerColorBtn.MouseButton1Click:Connect(function() openPalette(worldChangerColorBtn) end)
 crosshairColorBtn.MouseButton1Click:Connect(function() openPalette(crosshairColorBtn) end)
 espColorBtn.MouseButton1Click:Connect(function() openPalette(espColorBtn) end)
+serverDesyncColorBtn.MouseButton1Click:Connect(function() openPalette(serverDesyncColorBtn) end)
+hitboxColorBtn.MouseButton1Click:Connect(function() openPalette(hitboxColorBtn) end)
 
 espColorBtn:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
 	MVSD_ESP_Color = espColorBtn.BackgroundColor3
+	Hitbox_Color = MVSD_ESP_Color
 end)
 end -- Palette scope
 
@@ -2827,6 +3011,11 @@ Config_gatherSettingsData = function()
 		fovRainbow = FOV_Rainbow,
 		mvsdEspEnabled = MVSD_ESP_Enabled,
 		mvsdEspColor = Config_colorToHex(espColorBtn.BackgroundColor3),
+		serverDesyncEnabled = ServerDesync_Enabled,
+		serverDesyncColor = Config_colorToHex(serverDesyncColorBtn.BackgroundColor3),
+		hitboxEnabled = Hitbox_Enabled,
+		hitboxSize = Hitbox_Size,
+		hitboxColor = Config_colorToHex(Hitbox_Color),
 
 		-- Appearance
 		appearanceIsVip = Appearance_IsVip,
@@ -2938,6 +3127,18 @@ Config_loadConfigByName = function(Config_cName)
 				if Config_data.mvsdEspColor then 
 					MVSD_ESP_Color = Config_hexToColor(Config_data.mvsdEspColor)
 					espColorBtn.BackgroundColor3 = MVSD_ESP_Color
+				end
+
+				if Config_data.serverDesyncColor then
+					ServerDesync_Color = Config_hexToColor(Config_data.serverDesyncColor)
+					serverDesyncColorBtn.BackgroundColor3 = ServerDesync_Color
+				end
+				if Config_data.serverDesyncEnabled ~= nil and CheckboxSetters["ServerDesync"] then CheckboxSetters["ServerDesync"](Config_data.serverDesyncEnabled, true) end
+				if Config_data.hitboxEnabled ~= nil and CheckboxSetters["Hitbox"] then CheckboxSetters["Hitbox"](Config_data.hitboxEnabled, true) end
+				if Config_data.hitboxSize and SliderSetters["HitboxSize"] then SliderSetters["HitboxSize"](Config_data.hitboxSize) end
+				if Config_data.hitboxColor then
+					Hitbox_Color = Config_hexToColor(Config_data.hitboxColor)
+					hitboxColorBtn.BackgroundColor3 = Hitbox_Color
 				end
 
 				-- Appearance
