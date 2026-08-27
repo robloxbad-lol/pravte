@@ -1389,54 +1389,68 @@ LocalPlayer.CharacterAdded:Connect(function()
 	if ServerDesync_Enabled then task.wait(0.5); ServerDesync_Setup() end
 end)
 
--- Hitbox runtime (SlowKill と同じ敵判定: Team1/Team2 + 同じMatchWorkspaceのみ)
+-- Hitbox helper functions (貼ってくれたコードと同じ)
+local function GetPlayerTeam(plr)
+	local success, val = pcall(function()
+		return plr.Team
+	end)
+	if success and val then
+		if typeof(val) == "Instance" then return val.Name
+		elseif typeof(val) == "string" then return val end
+	end
+
+	local teamChild = plr:FindFirstChild("Team")
+	if teamChild then
+		if teamChild:IsA("ValueBase") then return tostring(teamChild.Value)
+		elseif teamChild:IsA("StringValue") then return teamChild.Value
+		else return teamChild.Name end
+	end
+
+	return ""
+end
+
+local function IsInSameMatchWorkspace(plr)
+	local char = plr.Character
+	if char and char.Parent == Workspace then
+		return true
+	end
+	if Workspace:FindFirstChild(plr.Name) then
+		return true
+	end
+	return false
+end
+
+-- Hitbox runtime (貼ってくれたコードと同じ敵判定)
 RunService.RenderStepped:Connect(function()
-	for plr, data in pairs(Hitbox_Original) do
-		if not Hitbox_Enabled or not plr.Parent or not plr.Character or not plr.Character:FindFirstChild("HumanoidRootPart") then
-			if plr.Parent and plr.Character then
-				local r = plr.Character:FindFirstChild("HumanoidRootPart")
-				if r and data.size then
-					r.Size = data.size
-					r.Transparency = data.transparency
-					r.Color = data.color
-					r.CanCollide = data.canCollide
-				end
-			end
-			Hitbox_Original[plr] = nil
-		end
-	end
-	if not Hitbox_Enabled then return end
+    if not Hitbox_Enabled then return end
 
-	local myTeamName = ""
-	pcall(function() myTeamName = GetPlayerTeam(LocalPlayer):lower() end)
-	if myTeamName ~= "team1" and myTeamName ~= "team2" then return end
+    local myTeamName = GetPlayerTeam(LocalPlayer):lower()
+    if myTeamName ~= "team1" and myTeamName ~= "team2" then return end
 
-	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr ~= LocalPlayer and plr.Character then
-			local targetTeamName = ""
-			pcall(function() targetTeamName = GetPlayerTeam(plr):lower() end)
-			local isEnemy = false
-			if (targetTeamName == "team1" or targetTeamName == "team2") and targetTeamName ~= myTeamName then
-				local sameMatch = false
-				pcall(function() sameMatch = IsInSameMatchWorkspace(plr) end)
-				if sameMatch then isEnemy = true end
-			end
+    for _, v in ipairs(Players:GetPlayers()) do
+        if v ~= LocalPlayer and v.Character then
+            local char = v.Character
+            local root = char:FindFirstChild("HumanoidRootPart")
+            local hum = char:FindFirstChild("Humanoid")
+            local targetTeamName = GetPlayerTeam(v):lower()
 
-			if isEnemy then
-				local r = plr.Character:FindFirstChild("HumanoidRootPart")
-				local hum = plr.Character:FindFirstChildOfClass("Humanoid")
-				if r and hum and hum.Health > 0 then
-					if not Hitbox_Original[plr] then
-						Hitbox_Original[plr] = {size=r.Size, transparency=r.Transparency, color=r.Color, canCollide=r.CanCollide}
-					end
-					r.Size = Vector3.new(Hitbox_Size, Hitbox_Size, Hitbox_Size)
-					r.Color = Hitbox_Color
-					r.Transparency = 0.6
-					r.CanCollide = false
-				end
-			end
-		end
-	end
+            local isEnemy = false
+            if (targetTeamName == "team1" or targetTeamName == "team2") then
+                if myTeamName ~= targetTeamName then
+                    if IsInSameMatchWorkspace(v) then
+                        isEnemy = true
+                    end
+                end
+            end
+
+            if isEnemy and root and hum and hum.Health > 0 then
+                root.Size = Vector3.new(Hitbox_Size, Hitbox_Size, Hitbox_Size)
+                root.Color = Hitbox_Color
+                root.Transparency = 0.6
+                root.CanCollide = false
+            end
+        end
+    end
 end)
 
 -- Server Desync: toggle後にも確実に生成されるよう、キャラクター未準備時は再試行
@@ -1546,35 +1560,9 @@ Players.PlayerRemoving:Connect(function(v)
 	if playerLabels[v] then playerLabels[v]:Remove(); playerLabels[v] = nil end
 end)
 
-local function GetPlayerTeam(plr)
-	local success, val = pcall(function()
-		return plr.Team
-	end)
-	if success and val then
-		if typeof(val) == "Instance" then return val.Name
-		elseif typeof(val) == "string" then return val end
-	end
 
-	local teamChild = plr:FindFirstChild("Team")
-	if teamChild then
-		if teamChild:IsA("ValueBase") then return tostring(teamChild.Value)
-		elseif teamChild:IsA("StringValue") then return teamChild.Value
-		else return teamChild.Name end
-	end
 
-	return ""
-end
 
-local function IsInSameMatchWorkspace(plr)
-	local char = plr.Character
-	if char and char.Parent == Workspace then
-		return true
-	end
-	if Workspace:FindFirstChild(plr.Name) then
-		return true
-	end
-	return false
-end
 
 RunService.RenderStepped:Connect(function()
 	local Camera = workspace.CurrentCamera
